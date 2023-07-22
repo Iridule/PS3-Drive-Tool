@@ -1,0 +1,561 @@
+#!/bin/bash
+
+
+# Define color variables
+RED="\e[31m"
+YELLOW="\e[33m"
+BLUE="\e[34m"
+GRAY="\e[90m"
+NORMAL="\e[0m"
+GREEN="\e[32m"
+
+
+
+# Function to clear the screen
+clear_screen() {
+    printf "\033c"
+}
+
+# Function to check if running as root
+check_root() {
+    if [[ $EUID -ne 0 ]]; then
+        if [[ -z $SUDO_EXECUTED ]]; then
+            echo "This script requires root privileges. Please enter the sudo password."
+            export SUDO_EXECUTED=1
+            sudo -k  # Reset the sudo timestamp
+            sudo "$0" "$@"  # Re-execute the script with sudo
+            exit $?
+        else
+            echo "Script is already running with sudo privileges. Aborting."
+            exit 1
+        fi
+    fi
+}
+
+# Check if running as root
+check_root "$@"
+
+
+
+# Function for initial setup
+initial_setup() {
+ local script_dir=$(dirname "$(readlink -f "$0")")
+    local config_file="$script_dir/.config"
+
+
+    # Check if .config file exists and display its content
+    config_content=""
+    if [[ -f "$config_file" ]]; then
+        config_content=$(cat "$config_file")
+    fi
+
+    # Prompt user for input using zenity
+    dialog_result=$(zenity --forms --title="Initial Setup" --text="Enter the following information:" \
+        --add-entry="PS3 drive mount path:" \
+        --add-entry="PS3 V-Flash mount path:" \
+        --add-entry="Path to ufs_module.ko:" \
+        --add-entry="Path to bswap16_module.ko:" \
+        --add-entry="Path to ata_key.bin:")
+
+    # Check if the user canceled the setup
+    if [[ $? -ne 0 ]]; then
+        zenity --info --title="Setup Canceled" --text="Setup canceled. Returning to the main menu.">/dev/null 2>&1
+        sleep 2
+       
+        return
+    fi
+
+    # Read the configuration values from the dialog result
+    IFS='|' read -ra config_values <<< "$dialog_result"
+    ps3_drive_mount_path="${config_values[0]}"
+    ps3_drive_vflash_mount_path="${config_values[1]}"
+    ufs_module_path="${config_values[2]}"
+    bswap16_module_path="${config_values[3]}"
+    ps3_drive_keys_path="${config_values[4]}"
+    load_module="true"
+
+# Save user configuration to the .config file
+    if echo -e "export ps3_drive_mount_path=\"$ps3_drive_mount_path\"\n\
+export ps3_drive_vflash_mount_path=\"$ps3_drive_vflash_mount_path\"\n\
+export ps3_drive_keys_path=\"$ps3_drive_keys_path\"\n\
+export ufs_module_path=\"$ufs_module_path\"\n\
+export bswap16_module_path=\"$bswap16_module_path\"\n\
+export load_module=\"$load_module\"" > "$config_file"; then
+        chown "$(logname)" "$config_file"  # Change ownership to the low-level user
+        zenity --info --title="PS3 Drive Mounter" --text "Configuration saved to $config_file" 8 60
+        sleep 2
+       
+    else
+        zenity --info --title="Configuration Save Error" --text="Error saving configuration to $config_file"
+        sleep 2
+     
+    fi
+}
+
+
+
+# Function to check if .config file exists
+check_config() {
+    local script_dir=$(dirname "$(readlink -f "$0")")
+    local config_file="$script_dir/.config"
+
+    if [[ -f "$config_file" ]]; then
+        echo "Config file found"
+       source "$script_dir/.config"  # Load the configuration from the file
+    else
+        echo "Config file not found."
+        read -p "Do you want to run the initial setup? (y/n): " choice
+        if [[ $choice =~ ^[Yy]$ ]]; then
+            initial_setup
+        fi
+    fi
+    sleep 1
+}
+# Function to show loading animation
+show_loading_animation() {
+    local chars="/-\|"
+
+    while :; do
+        for ((i = 0; i < ${#chars}; i++)); do
+            echo -ne "\r[${chars:i:1}] Checking and loading modules..."
+            sleep 0.2
+        done
+    done
+}
+
+# Function to display notifications with sufficient time
+display_notification() {
+    local message=$1
+    echo -e "\n$message"
+    sleep 2
+}
+
+# Function to check and load modules
+check_and_load_modules() {
+    # Load module paths from the .config file
+    source "$script_dir/.config"
+
+    local ufs_loaded=false
+    local bswap16_loaded=false
+
+    # Check if UFS module is loaded or built into the kernel
+    if lsmod | grep -q "ufs" || grep -q "CONFIG_UFS_FS=y" /boot/config-$(uname -r); then
+        if lsmod | grep -q "ufs"; then
+            display_notification "${GREEN}UFS module is loaded.${NORMAL}"
+            ufs_loaded=true
+        else
+            display_notification "${YELLOW}UFS module is built into the kernel.${NORMAL}"
+            ufs_loaded=true
+        fi
+    else
+        # Check if UFS module path is specified in the .config file
+        if [[ -n $ufs_module_path ]]; then
+            echo "UFS module is not loaded. Loading from the specified path: $ufs_module_path"
+            insmod "$ufs_module_path"
+            sleep 1
+            ufs_loaded=true
+        else
+            display_notification "${RED}UFS module is not loaded or built into the kernel.${NORMAL}"
+        fi
+    fi
+
+    # Check if Bswap16 module is loaded or built into the kernel
+    if lsmod | grep -q "bswap16" || grep -q "CONFIG_BSWAP16=y" /boot/config-$(uname -r); then
+        if lsmod | grep -q "bswap16"; then
+            display_notification "${GREEN}Bswap16 module is loaded.${NORMAL}"
+            bswap16_loaded=true
+        else
+            display_notification "${YELLOW}Bswap16 module is built into the kernel.${NORMAL}"
+        fi
+    else
+        # Check if Bswap16 module path is specified in the .config file
+        if [[ -n $bswap16_module_path ]]; then
+            echo "Bswap16 module is not loaded. Loading from the specified path: $bswap16_module_path"
+            insmod "$bswap16_module_path"
+            sleep 1
+            bswap16_loaded=true
+        else
+            display_notification "${RED}Bswap16 module is not loaded or built into the kernel.${NORMAL}"
+        fi
+    fi
+
+    # Check if UFS module is loaded or built into the kernel
+    if [[ $ufs_loaded == true ]]; then
+        # Check if read-write support for UFS is enabled in the kernel
+        if grep -q '^CONFIG_UFS_FS_WRITE=y$' /boot/config-$(uname -r); then
+            display_notification "${GREEN}Read-write support for UFS is enabled in the kernel${NORMAL}"
+            sleep 1
+        else
+            display_notification "${RED}Read-write support for UFS is not enabled in the kernel${NORMAL}"
+            sleep 1
+        fi
+    fi
+}
+
+
+
+# Function to exit the script
+exit_script() {
+    echo -e "${YELLOW}Exiting the script...${NORMAL}"
+    sleep 2
+    clear_screen
+
+    print_header
+    echo -e "${GREEN}Thank you for using PS3 Drive Mounter!"
+    echo -e "${YELLOW}Re-Run Script to unmount..."
+   # Animation variables
+    animation_text="Goodbye..."
+    animation_length=${#animation_text}
+    animation_delay=0.1
+
+    # Display animation for 2 seconds
+    for ((i=0; i<2; i++)); do
+        for ((j=0; j<animation_length; j++)); do
+            printf "${GREEN}${animation_text:0:j+1}${NORMAL}"
+            sleep $animation_delay
+            printf "\r"
+        done
+    done
+    sleep 1
+    clear_screen
+ 
+# Define the countdown duration in seconds
+    countdown_duration=3
+
+    # Display the exit screen with countdown
+    for ((i = countdown_duration; i >= 0; i--)); do
+        clear_screen
+        print_header
+        echo -e "${YELLOW}Script will self destruct in ${RED}${i}${NORMAL}"
+        sleep 1
+    done
+
+    # Display ASCII art for 4 seconds
+    clear_screen
+echo -e "\033[0;32mâ–’â–ˆâ–€â–€â–ˆ â–‘â–ˆâ–€â–€â–ˆ â–’â–ˆâ–€â–„â–€â–ˆ â–’â–ˆâ–€â–€â–€ ã€€ â–’â–ˆâ–€â–€â–€â–ˆ â–’â–ˆâ–‘â–‘â–’â–ˆ â–’â–ˆâ–€â–€â–€ â–’â–ˆâ–€â–€â–ˆ"
+echo -e "â–’â–ˆâ–‘â–„â–„ â–’â–ˆâ–„â–„â–ˆ â–’â–ˆâ–’â–ˆâ–’â–ˆ â–’â–ˆâ–€â–€â–€ ã€€ â–’â–ˆâ–‘â–‘â–’â–ˆ â–‘â–’â–ˆâ–’â–ˆâ–‘ â–’â–ˆâ–€â–€â–€ â–’â–ˆâ–„â–„â–€"
+echo -e "â–’â–ˆâ–„â–„â–ˆ â–’â–ˆâ–‘â–’â–ˆ â–’â–ˆâ–‘â–‘â–’â–ˆ â–’â–ˆâ–„â–„â–„ ã€€ â–’â–ˆâ–„â–„â–„â–ˆ â–‘â–‘â–€â–„â–€â–‘ â–’â–ˆâ–„â–„â–„ â–’â–ˆâ–‘â–’â–ˆ\033[0m"
+
+    sleep 4
+
+    clear_screen
+    exit
+}
+
+
+# Invoke the loading animation while running the check_and_load_modules function
+show_loading_animation &
+loading_pid=$!
+
+# Wait for the loading animation to start
+sleep 3
+
+
+# Kill the loading animation process
+kill $loading_pid >/dev/null 2>&1 || true
+
+
+# Check if .config file exists
+check_config
+check_and_load_modules
+
+
+
+# Function to select the PS3 drive
+select_ps3_drive() {
+    local devices
+    local options=()
+    local ps3_drive
+
+    # Get a list of available devices
+    devices=$(lsblk -ndo KNAME,MODEL | awk '/^sd/ {print $1 ":" $2}')
+
+
+    # Create options array with formatted device information
+    while IFS=':' read -r kname model; do
+        formatted_name="${model} (${kname})"
+        options+=("$kname" "$formatted_name")
+    done <<< "$devices"
+
+    # Display the selection menu using Zenity
+    selection=$(zenity --list --title "Select PS3 Drive" --text "Choose a PS3 drive:" \
+        --column "Drive" --column "Model" "${options[@]}")
+
+    # Check if Cancel button is clicked
+    if [[ -z "$selection" ]]; then
+        echo "Returning to the main menu..." null>/dev/null 2>&1
+        sleep 2
+        display_main_menu
+        return
+    fi
+
+# Find the corresponding device name based on the selected option
+ps3_drive=$(echo "$devices" | awk -F ':' -v selected="$selection" '$1 == selected {print $1}')
+mount_ps3_drive "/dev/$ps3_drive"  # Pass the selected PS3 drive to the mount_ps3_drive function, suppress echo output
+
+
+# Call the exit script after successful mounting
+    exit_script
+
+}
+
+
+# Function to unmount the PS3 drive
+unmount_ps3_drive() {
+  # Animation - Removing previous mount points
+  echo -e "\e[33mRemoving previous mount points...\e[0m"
+
+  # Check if PS3 hard drive is still mounted after unmounting
+  if mount | grep -q "$ps3_drive_mount_path"; then
+    sudo umount "$ps3_drive_mount_path"
+  fi
+
+  if mount | grep -q "$ps3_drive_vflash_mount_path"; then
+    sudo umount "$ps3_drive_vflash_mount_path"
+  fi
+
+  # Close cryptsetup mappings
+  success=true
+
+  # Close ps3hdd2 mapping
+  if ! sudo cryptsetup close ps3hdd2 >/dev/null 2>&1; then
+    success=false
+  fi
+
+  # Close ps3hdd1 mapping
+  if ! sudo cryptsetup close ps3hdd1 >/dev/null 2>&1; then
+    success=false
+  fi
+
+  # Close ps3hdd mapping
+  if ! sudo cryptsetup close ps3hdd >/dev/null 2>&1; then
+    success=false
+  fi
+
+  # Close ps3hdd-bs mapping
+  if ! sudo cryptsetup remove ps3hdd-bs >/dev/null 2>&1; then
+    success=false
+  fi
+
+  # Animation - Please wait
+  echo -ne "\e[32mPlease wait...\e[0m"
+  sleep 3
+
+  # Display result of drive mappings removal
+  if $success; then
+    echo -e "${GREEN}Drive mappings successfully removed.${NORMAL}"
+  else
+    echo -e "${RED}Failed to remove drive mappings.${NORMAL}"
+  fi
+}
+
+
+
+# Call the function
+unmount_ps3_drive
+
+# Get the script's directory
+script_dir="$(dirname "$0")"
+
+# Function to mount the PS3 hard drive
+mount_ps3_drive() {
+    local ps3_drive="$1"
+
+    # Create mapper for bit order conversion
+    cryptsetup create -c bswap16-ecb -d /dev/zero ps3hdd-bs "$ps3_drive" >/dev/null 2>&1
+
+
+
+# Decrypt the PS3 hard drive based on console type
+cryptsetup create -c aes-cbc-null -d "$ps3_drive_keys_path" -s 192 ps3hdd /dev/mapper/ps3hdd-bs >/dev/null 2>&1
+
+# Map the partitions
+kpartx -a /dev/mapper/ps3hdd >/dev/null 2>&1
+
+   # Prompt user for read-only or read-write mount
+options=("Read-Only" "Read-Write" "Exit")
+choice=$(zenity --list --title "Mount PS3 Hard Drive" --text "Select mount mode:" \
+    --column "Mode" "${options[@]}")
+
+case $choice in
+    "Read-Only")
+        zenity --info --title "Mount PS3 Hard Drive" --text "PS3 hard drive mounted in read-only mode." --width 300
+        mount -t ufs -o ufstype=ufs2,ro /dev/mapper/ps3hdd1 "$ps3_drive_mount_path"
+        mount -t vfat /dev/mapper/ps3hdd2 "$ps3_drive_vflash_mount_path"
+        ;;
+    "Read-Write")
+        zenity --info --title "Mount PS3 Hard Drive" --text "PS3 hard drive mounted in read-write mode. Be careful." --width 300
+        mount -t ufs -o ufstype=ufs2,rw /dev/mapper/ps3hdd1 "$ps3_drive_mount_path" >/dev/null 2>&1 &
+        if [[ $? -eq 0 ]]; then
+            mount -o remount,rw /dev/mapper/ps3hdd1 "$ps3_drive_mount_path" >/dev/null 2>&1 &
+            if [[ $? -eq 0 ]]; then
+                xdg-open "$ps3_drive_mount_path" >/dev/null 2>&1 &
+                mount_success=false  # Set the flag to break out of the while loop
+                outer_break=false  # Set the flag to break out of the outer while loop
+            else
+                zenity --error --title "Mount PS3 Hard Drive" --text "Error: Failed to remount the PS3 hard drive in read-write mode." --width 300
+            fi
+        else
+            zenity --error --title "Mount PS3 Hard Drive" --text "Error: Failed to mount the PS3 hard drive in read-write mode." --width 300
+        fi
+            ;;
+        "3")
+          display_main_menu
+            ;;
+        *)
+            # Check if Cancel button is clicked
+            if [[ $choice == "" ]]; then
+                echo "Returning to the main menu...">/dev/null 2>&1
+                display_main_menu
+                      fi
+            ;;
+    esac
+}
+
+# Function to print a fancy header
+print_header() {
+    clear_screen
+echo -e ${RED}"\e[1m\e[2m      â–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ•—â–‘â–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ•—â–‘â–ˆâ–ˆâ•—â–ˆâ–ˆâ•—â–‘â–‘â–‘â–ˆâ–ˆâ•—â–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ•—â€ƒâ€ƒâ€ƒâ€ƒâ€ƒâ€ƒ"${RED}
+echo -e "      â–ˆâ–ˆâ•”â•â•â–ˆâ–ˆâ•—â–ˆâ–ˆâ•”â•â•â–ˆâ–ˆâ•—â–ˆâ–ˆâ•‘â–ˆâ–ˆâ•‘â–‘â–‘â–‘â–ˆâ–ˆâ•‘â–ˆâ–ˆâ•”â•â•â•â•â•â€ƒâ€ƒâ€ƒâ€ƒâ€ƒâ€ƒ"${RED}
+echo -e "      â–ˆâ–ˆâ•‘â–‘â–‘â–ˆâ–ˆâ•‘â–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ•”â•â–ˆâ–ˆâ•‘â•šâ–ˆâ–ˆâ•—â–‘â–ˆâ–ˆâ•”â•â–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ•—â–‘â–‘â€ƒâ€ƒâ€ƒâ€ƒâ€ƒâ€ƒ"${RED}
+echo -e "      â–ˆâ–ˆâ•‘â–‘â–‘â–ˆâ–ˆâ•‘â–ˆâ–ˆâ•”â•â•â–ˆâ–ˆâ•—â–ˆâ–ˆâ•‘â–‘â•šâ–ˆâ–ˆâ–ˆâ–ˆâ•”â•â–‘â–ˆâ–ˆâ•”â•â•â•â–‘â–‘â€ƒâ€ƒâ€ƒâ€ƒâ€ƒâ€ƒ"${RED}
+echo -e "      â–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ•”â•â–ˆâ–ˆâ•‘â–‘â–‘â–ˆâ–ˆâ•‘â–ˆâ–ˆâ•‘â–‘â–‘â•šâ–ˆâ–ˆâ•”â•â–‘â–‘â–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ•—â€ƒâ€ƒâ€ƒâ€ƒâ€ƒâ€ƒ"${RED}
+echo -e "      â•šâ•â•â•â•â•â•â–‘â•šâ•â•â–‘â–‘â•šâ•â•â•šâ•â•â–‘â–‘â–‘â•šâ•â•â–‘â–‘â–‘â•šâ•â•â•â•â•â•â•â€ƒâ€ƒâ€ƒâ€ƒâ€ƒâ€ƒ"${RED}
+echo
+echo -e ${BLUE}"\e[1m\e[2m      â–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ•—â–‘â–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ•—â–‘â–‘â–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ•—â–‘â–ˆâ–ˆâ•—â–‘â–‘â–‘â–‘â–‘"${BLUE}
+echo -e "      â•šâ•â•â–ˆâ–ˆâ•”â•â•â•â–ˆâ–ˆâ•”â•â•â–ˆâ–ˆâ•—â–ˆâ–ˆâ•”â•â•â–ˆâ–ˆâ•—â–ˆâ–ˆâ•‘â–‘â–‘â–‘â–‘â–‘"${BLUE}
+echo -e "      â–‘â–‘â–‘â–ˆâ–ˆâ•‘â–‘â–‘â–‘â–ˆâ–ˆâ•‘â–‘â–‘â–ˆâ–ˆâ•‘â–ˆâ–ˆâ•‘â–‘â–‘â–ˆâ–ˆâ•‘â–ˆâ–ˆâ•‘â–‘â–‘â–‘â–‘â–‘"${BLUE}
+echo -e "      â–‘â–‘â–‘â–ˆâ–ˆâ•‘â–‘â–‘â–‘â–ˆâ–ˆâ•‘â–‘â–‘â–ˆâ–ˆâ•‘â–ˆâ–ˆâ•‘â–‘â–‘â–ˆâ–ˆâ•‘â–ˆâ–ˆâ•‘â–‘â–‘â–‘â–‘â–‘"${BLUE}
+echo -e "      â–‘â–‘â–‘â–ˆâ–ˆâ•‘â–‘â–‘â–‘â•šâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ•”â•â•šâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ•”â•â–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ–ˆâ•—"${BLUE}
+echo -e "      â–‘â–‘â–‘â•šâ•â•â–‘â–‘â–‘â–‘â•šâ•â•â•â•â•â–‘â–‘â•šâ•â•â•â•â•â–‘â•šâ•â•â•â•â•â•â•"${BLUE}
+echo
+}
+
+
+
+
+#Main Menu
+display_main_menu() {
+    print_header
+    echo -e "${GREEN}Welcome to PS3 Drive Mounter!"
+    echo -e "By:IRIDULE. v.2.1${RED}"
+    echo "=============================="
+
+    # Define the animation text
+    animation_text="Press any key"
+    animation_length=${#animation_text}
+
+    # Start the loading animation
+    animation_index=0
+
+    # Disable cursor blinking
+    tput civis
+
+    while true; do
+        clear_screen
+        print_header
+        echo -e "${GREEN}Welcome to PS3 Drive Mounter"
+        echo -e "By: IRIDULE  v.2.1${RED}"
+        echo "=============================="
+
+        # Display the animation text
+        printf "\r${YELLOW}${animation_text:0:animation_index}"
+
+        ((animation_index++))
+        ((animation_index == animation_length + 1)) && animation_index=0
+
+        # Sleep for a short duration to control the animation speed
+        sleep 0.1
+
+        # Check if a key is pressed, break the loop if so
+        if read -t 0.01 -n 1; then
+            break
+        fi
+    done
+
+    # Enable cursor blinking again
+    tput cnorm
+
+
+
+
+
+# Get the script directory
+script_dir=$(dirname "$(realpath "${BASH_SOURCE[0]}")")
+
+# Function to run the bonus process
+run_bonus_process() {
+    echo "Starting bonus process..."
+
+    # Check if "terminal-pong" directory exists
+    if [ -d "$script_dir/terminal-pong" ]; then
+        echo "Skipping clone process. 'terminal-pong' already exists."
+    else
+        # Clone "terminal-pong" repository into the script directory with normal user permissions
+        sudo -u "$(logname)" git clone https://github.com/kumaran-14/terminal-pong.git "$script_dir/terminal-pong"
+    fi
+
+# Launch a new terminal window and execute the commands in it
+    sudo -u "$(logname)" gnome-terminal --maximize -- bash -c "sleep 1; cd \"$script_dir/terminal-pong/build\"; ./pong; exit_status=\$?; if [ \$exit_status -eq 0 ]; then sleep 0; fi"
+}
+
+
+# Stop the loading animation and display the menu options
+clear_screen
+print_header
+echo -e "${YELLOW}Main Menu${NORMAL}"
+echo -e "Beta Version 2.1"
+echo "=============================="
+echo -e "${YELLOW}Please select an option:${GREEN}"
+
+# Determine the available width for the menu options
+menu_width=$((COLUMNS - 10))
+
+options=("Mount PS3 Hard Drive" "Configure" "Quit" "Bonus")
+
+# Iterate over the options and display them in columns
+for ((i = 0; i < ${#options[@]}; i++)); do
+    printf "%-2d%s\n" "$((i + 1))" "${options[i]}"
+done
+
+echo 
+
+# Prompt for user input
+read -rp "Select an option (1-${#options[@]}): " choice
+
+# Check the selected option and proceed accordingly
+case $choice in
+    [1-${#options[@]}])
+        selected_option="${options[$((choice - 1))]}"
+        echo "Selected option: $selected_option"
+        echo
+        
+        case $selected_option in
+            "Mount PS3 Hard Drive")
+                select_ps3_drive
+                ;;
+            "Configure")
+                initial_setup
+                ;;
+            "Quit")
+                exit_script
+                ;;
+            "Bonus")
+                run_bonus_process
+                ;;
+            *)
+                echo -e "${RED}Invalid option. Please try again.${NORMAL}"
+                ;;
+        esac
+        ;;
+    *)
+        echo -e "${RED}Invalid option. Please try again.${NORMAL}"
+        ;;
+esac
+}
+
+# Main script execution
+display_main_menu
+while true; do
+display_main_menu
+done
